@@ -47,6 +47,7 @@ EVENT_TYPES = {
     "sikeres közeli": "CLOSE_MADE",
     "sikertelen közeli": "CLOSE_MISS",
     "sikeres zsákolás": "DUNK_MADE",       # zsákolás = közeli variáns (2 pont)
+    "sikertelen zsákolás": "DUNK_MISS",     # sikertelen zsákolás
     # Középtávoli (2 pont)
     "sikeres középtávoli": "MID_MADE",
     "sikertelen középtávoli": "MID_MISS",
