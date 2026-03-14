@@ -858,9 +858,9 @@ def get_playing_time(conn: sqlite3.Connection, match_id: str,
     on_court: dict[str, int] = {}
     minutes_played: dict[str, int] = {}
 
-    # Starters enter at minute 1 (start of game)
+    # Starters enter at minute 0 (game start, before "1. perc")
     for p in starters:
-        on_court[p] = 1
+        on_court[p] = 0
         minutes_played[p] = 0
 
     # Process substitutions
