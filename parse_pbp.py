@@ -820,6 +820,69 @@ def get_starters(conn: sqlite3.Connection, match_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Playing time calculation
+# ---------------------------------------------------------------------------
+
+
+def get_playing_time(conn: sqlite3.Connection, match_id: str,
+                     team: str) -> dict[str, int]:
+    """
+    Calculate approximate playing time (in minutes) for each player.
+
+    Uses substitution data + starter detection. Precision: ±1 minute
+    (PBP only has whole-minute markers, no seconds).
+
+    Returns dict: player_name → minutes played.
+    """
+    # Get game length (40 for regulation, 45 for OT, etc.)
+    row = conn.execute(
+        "SELECT quarter_scores FROM matches WHERE match_id = ?",
+        (match_id,)
+    ).fetchone()
+    quarters = json.loads(row[0]) if row else []
+    game_end = len(quarters) * 10  # 10 min per quarter
+
+    # Get starters
+    starters = set(get_starters(conn, match_id, team))
+
+    # Get all substitutions ordered by event_seq
+    subs = conn.execute("""
+        SELECT player_in, player_out, minute
+        FROM substitutions
+        WHERE match_id = ? AND team = ?
+        ORDER BY event_seq
+    """, (match_id, team)).fetchall()
+
+    # Track who is on court and when they entered
+    # on_court: player → minute they came on
+    on_court: dict[str, int] = {}
+    minutes_played: dict[str, int] = {}
+
+    # Starters enter at minute 1 (start of game)
+    for p in starters:
+        on_court[p] = 1
+        minutes_played[p] = 0
+
+    # Process substitutions
+    for player_in, player_out, minute in subs:
+        # Player going out: accumulate time
+        if player_out in on_court:
+            entered = on_court.pop(player_out)
+            minutes_played.setdefault(player_out, 0)
+            minutes_played[player_out] += minute - entered
+        # Player coming in: start tracking
+        on_court[player_in] = minute
+        minutes_played.setdefault(player_in, 0)
+
+    # End of game: all remaining on-court players get time until game_end
+    for p, entered in on_court.items():
+        minutes_played.setdefault(p, 0)
+        minutes_played[p] += game_end - entered
+
+    return minutes_played
+
+
+# ---------------------------------------------------------------------------
 # URL parsing
 # ---------------------------------------------------------------------------
 
