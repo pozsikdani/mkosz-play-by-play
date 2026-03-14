@@ -757,6 +757,65 @@ def validate_match(
 
 
 # ---------------------------------------------------------------------------
+# Starter detection
+# ---------------------------------------------------------------------------
+
+
+def get_starters(conn: sqlite3.Connection, match_id: str,
+                 team: str) -> list[str]:
+    """
+    Detect starters for a team in a match.
+
+    A player is a starter if:
+    - They were subbed OUT before ever being subbed IN, OR
+    - They appeared in events before ever being subbed IN, OR
+    - They were never subbed IN but have events or were subbed OUT
+    """
+    rows = conn.execute("""
+        WITH
+        first_sub_in AS (
+            SELECT player_in AS player, MIN(event_seq) AS seq
+            FROM substitutions
+            WHERE match_id = ? AND team = ?
+            GROUP BY player_in
+        ),
+        first_sub_out AS (
+            SELECT player_out AS player, MIN(event_seq) AS seq
+            FROM substitutions
+            WHERE match_id = ? AND team = ?
+            GROUP BY player_out
+        ),
+        first_event AS (
+            SELECT player_name AS player, MIN(event_seq) AS seq
+            FROM events
+            WHERE match_id = ? AND team = ? AND player_name IS NOT NULL
+            GROUP BY player_name
+        ),
+        all_players AS (
+            SELECT player FROM first_sub_in
+            UNION
+            SELECT player FROM first_sub_out
+            UNION
+            SELECT player FROM first_event
+        )
+        SELECT ap.player
+        FROM all_players ap
+        LEFT JOIN first_sub_in fsi ON fsi.player = ap.player
+        LEFT JOIN first_sub_out fso ON fso.player = ap.player
+        LEFT JOIN first_event fe ON fe.player = ap.player
+        WHERE
+            -- Never subbed IN but has events or was subbed out
+            (fsi.seq IS NULL AND (fe.seq IS NOT NULL OR fso.seq IS NOT NULL))
+            -- Subbed OUT before first sub IN
+            OR (fso.seq IS NOT NULL AND (fsi.seq IS NULL OR fso.seq < fsi.seq))
+            -- Event before first sub IN
+            OR (fe.seq IS NOT NULL AND (fsi.seq IS NULL OR fe.seq < fsi.seq))
+        ORDER BY COALESCE(fe.seq, fso.seq)
+    """, (match_id, team, match_id, team, match_id, team)).fetchall()
+    return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # URL parsing
 # ---------------------------------------------------------------------------
 
@@ -872,6 +931,10 @@ def main():
         "--force", action="store_true",
         help="Meglévő adat felülírása"
     )
+    parser.add_argument(
+        "--starters", action="store_true",
+        help="Kezdőötösök megjelenítése (már feldolgozott meccshez)"
+    )
 
     args = parser.parse_args()
 
@@ -884,6 +947,25 @@ def main():
             "Add meg a --url paramétert, vagy a --season, --comp, "
             "--game-id hármast!"
         )
+        return
+
+    if args.starters:
+        match_id = f"{comp}_{game_id}"
+        conn = create_db(args.db)
+        if not match_exists(conn, match_id):
+            print(f"HIBA: {match_id} nincs az adatbázisban!", file=sys.stderr)
+            conn.close()
+            return
+        row = conn.execute(
+            "SELECT team_a, team_b FROM matches WHERE match_id = ?",
+            (match_id,)
+        ).fetchone()
+        for side, name in [("A", row[0]), ("B", row[1])]:
+            starters = get_starters(conn, match_id, side)
+            print(f"\n{name} kezdőötös:")
+            for i, p in enumerate(starters, 1):
+                print(f"  {i}. {p}")
+        conn.close()
         return
 
     process_match(season, comp, game_id, args.db, force=args.force)
