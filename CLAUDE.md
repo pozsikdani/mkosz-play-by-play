@@ -29,27 +29,27 @@ python3 parse_pbp.py --url ... --force
 - **substitutions**: cserék (player_in, player_out)
 - **timeouts**: időkérések
 
-## Event Types
-| Kód | Magyar | Pont |
-|-----|--------|------|
-| FG2_MADE | sikeres közeli | 2 |
-| FG2M_MADE | sikeres középtávoli | 2 |
-| FG3_MADE | sikeres hárompontos | 3 |
-| FT_MADE | sikeres büntető | 1 |
-| DUNK_MADE | sikeres zsákolás | 2 |
-| FG2_MISS | sikertelen közeli | 0 |
-| FG2M_MISS | sikertelen középtávoli | 0 |
-| FG3_MISS | sikertelen hárompontos | 0 |
-| FT_MISS | kihagyott büntető | 0 |
-| OREB | támadólepattanó | - |
-| DREB | védőlepattanó | - |
-| FOUL | foult | - |
-| FOUL_DRAWN | kiharcolt fault | - |
-| BLK | blokk | - |
-| BLK_RECV | kapott blokk | - |
-| TOV | eladott labda | - |
-| STL | szerzett labda | - |
-| AST | gólpassz | - |
+## Event Types — 4 dobástípus
+| Dobástípus | Sikeres | Sikertelen | Pont |
+|------------|---------|------------|------|
+| Közeli | CLOSE_MADE | CLOSE_MISS | 2 |
+| Középtávoli | MID_MADE | MID_MISS | 2 |
+| Hárompontos | THREE_MADE | THREE_MISS | 3 |
+| Büntető | FT_MADE | FT_MISS | 1 |
+| Zsákolás | DUNK_MADE | - | 2 |
+
+## Egyéb event types
+| Kód | Magyar |
+|-----|--------|
+| OREB | támadólepattanó |
+| DREB | védőlepattanó |
+| FOUL | foult |
+| FOUL_DRAWN | kiharcolt fault |
+| BLK | blokk |
+| BLK_RECV | kapott blokk |
+| TOV | eladott labda |
+| STL | szerzett labda |
+| AST | gólpassz |
 
 ## URL Pattern
 ```

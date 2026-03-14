@@ -41,41 +41,44 @@ HU_MONTHS = {
 }
 
 # Event type mapping: Hungarian → normalized code
+# 4 dobástípus: közeli, középtávoli, hárompontos, büntető
 EVENT_TYPES = {
-    # Scoring (made)
-    "sikeres közeli": "FG2_MADE",
-    "sikeres középtávoli": "FG2M_MADE",
-    "sikeres hárompontos": "FG3_MADE",
+    # Közeli (2 pont)
+    "sikeres közeli": "CLOSE_MADE",
+    "sikertelen közeli": "CLOSE_MISS",
+    "sikeres zsákolás": "DUNK_MADE",       # zsákolás = közeli variáns (2 pont)
+    # Középtávoli (2 pont)
+    "sikeres középtávoli": "MID_MADE",
+    "sikertelen középtávoli": "MID_MISS",
+    # Hárompontos (3 pont)
+    "sikeres hárompontos": "THREE_MADE",
+    "sikertelen hárompontos": "THREE_MISS",
+    # Büntető (1 pont)
     "sikeres büntető": "FT_MADE",
-    "sikeres zsákolás": "DUNK_MADE",
-    # Missed
-    "sikertelen közeli": "FG2_MISS",
-    "sikertelen középtávoli": "FG2M_MISS",
-    "sikertelen hárompontos": "FG3_MISS",
     "kihagyott büntető": "FT_MISS",
-    # Rebounds
+    # Lepattanó
     "támadólepattanó": "OREB",
     "védőlepattanó": "DREB",
-    # Fouls
+    # Fault
     "foult": "FOUL",
     "kiharcolt fault": "FOUL_DRAWN",
-    # Blocks
+    # Blokk
     "blokk": "BLK",
     "kapott blokk": "BLK_RECV",
-    # Turnovers / steals
+    # Labda
     "eladott labda": "TOV",
     "szerzett labda": "STL",
-    # Playmaking
+    # Gólpassz
     "gólpassz": "AST",
 }
 
 # Points awarded for scoring event types
 POINTS_MAP = {
-    "FG2_MADE": 2,
-    "FG2M_MADE": 2,
-    "FG3_MADE": 3,
-    "FT_MADE": 1,
+    "CLOSE_MADE": 2,
     "DUNK_MADE": 2,
+    "MID_MADE": 2,
+    "THREE_MADE": 3,
+    "FT_MADE": 1,
 }
 
 # ---------------------------------------------------------------------------
