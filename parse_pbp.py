@@ -4,10 +4,15 @@ MKOSZ Play-by-Play parser.
 Scrapes play-by-play event lists from mkosz.hu and stores them in SQLite.
 
 Usage:
+    # Single match
     python3 parse_pbp.py --url https://mkosz.hu/merkozes-esemenylista/x2526/hun2a/hun2a_123749
     python3 parse_pbp.py --season x2526 --comp hun2a --game-id 123749
-    python3 parse_pbp.py --season x2526 --comp hun2a --game-id 123749 --db custom.sqlite
     python3 parse_pbp.py --season x2526 --comp hun2a --game-id 123749 --force
+
+    # Batch mode — all matches for a competition
+    python3 parse_pbp.py --season x2526 --comp hun2a
+    python3 parse_pbp.py --season x2526 --comp hun2a --list-only
+    python3 parse_pbp.py --season x2526 --comp hun2a --force
 """
 
 import argparse
@@ -27,11 +32,13 @@ from bs4 import BeautifulSoup, Tag
 # ---------------------------------------------------------------------------
 
 PBP_URL_TEMPLATE = "https://mkosz.hu/merkozes-esemenylista/{season}/{comp}/{comp}_{game_id}"
+SCHEDULE_URL = "https://mkosz.hu/bajnoksag-musor/{season}/{comp}/"
 DEFAULT_DB = "pbp.sqlite"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+BATCH_DELAY = 0.3  # seconds between requests in batch mode
 
 # Hungarian month names for date parsing
 HU_MONTHS = {
@@ -970,6 +977,73 @@ def process_match(
 
 
 # ---------------------------------------------------------------------------
+# Batch processing — discover all game IDs for a competition
+# ---------------------------------------------------------------------------
+
+
+def discover_game_ids(season: str, comp: str) -> list[int]:
+    """Fetch the MKOSZ schedule page and extract all game IDs."""
+    url = SCHEDULE_URL.format(season=season, comp=comp)
+    print(f"Műsor oldal letöltése: {url}")
+
+    html = fetch_html(url)
+    pattern = rf"{re.escape(comp)}_(\d+)"
+    ids = sorted(set(int(m) for m in re.findall(pattern, html)))
+    print(f"  {len(ids)} meccs azonosító találva")
+    return ids
+
+
+def process_batch(
+    season: str, comp: str, db_path: str, force: bool = False
+):
+    """Process all matches for a competition in batch mode."""
+    game_ids = discover_game_ids(season, comp)
+    if not game_ids:
+        print("Nem található meccs azonosító.")
+        return
+
+    conn = create_db(db_path)
+    total = len(game_ids)
+    processed = 0
+    skipped = 0
+    errors = 0
+
+    for i, gid in enumerate(game_ids, 1):
+        game_id = str(gid)
+        match_id = f"{comp}_{game_id}"
+
+        if not force and match_exists(conn, match_id):
+            skipped += 1
+            print(f"  [{i:>{len(str(total))}}/{total}] {match_id} — már feldolgozva")
+            if i < total:
+                time.sleep(BATCH_DELAY)
+            continue
+
+        try:
+            conn.close()  # process_match opens its own connection
+            process_match(season, comp, game_id, db_path, force=force)
+            processed += 1
+        except Exception as e:
+            print(f"  [{i:>{len(str(total))}}/{total}] {match_id} — HIBA: {e}",
+                  file=sys.stderr)
+            errors += 1
+
+        conn = create_db(db_path)
+
+        if i < total:
+            time.sleep(BATCH_DELAY)
+
+    conn.close()
+
+    print()
+    print(f"Összesen: {total} meccs")
+    print(f"  Feldolgozva:  {processed}")
+    print(f"  Már megvolt:  {skipped}")
+    if errors:
+        print(f"  Hibás:        {errors}")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -988,7 +1062,7 @@ def main():
         "--comp", help="Bajnokság kód (pl. hun2a)"
     )
     parser.add_argument(
-        "--game-id", help="Meccs azonosító (pl. 123749)"
+        "--game-id", help="Meccs azonosító (pl. 123749). Ha nincs megadva --season + --comp mellett, batch mód."
     )
     parser.add_argument(
         "--db", default=DEFAULT_DB,
@@ -1002,8 +1076,24 @@ def main():
         "--starters", action="store_true",
         help="Kezdőötösök megjelenítése (már feldolgozott meccshez)"
     )
+    parser.add_argument(
+        "--list-only", action="store_true",
+        help="Csak a meccs azonosítók kilistázása (batch módban)"
+    )
 
     args = parser.parse_args()
+
+    # Batch mode: --season + --comp without --game-id
+    if args.season and args.comp and not args.game_id and not args.url:
+        if args.list_only:
+            ids = discover_game_ids(args.season, args.comp)
+            if ids:
+                for gid in ids:
+                    print(f"  {args.comp}_{gid}")
+                print(f"\nÖsszesen: {len(ids)} meccs")
+            return
+        process_batch(args.season, args.comp, args.db, force=args.force)
+        return
 
     if args.url:
         season, comp, game_id = parse_url(args.url)
@@ -1011,8 +1101,8 @@ def main():
         season, comp, game_id = args.season, args.comp, args.game_id
     else:
         parser.error(
-            "Add meg a --url paramétert, vagy a --season, --comp, "
-            "--game-id hármast!"
+            "Add meg a --url paramétert, a --season + --comp + --game-id "
+            "hármast, vagy --season + --comp (batch mód)!"
         )
         return
 
