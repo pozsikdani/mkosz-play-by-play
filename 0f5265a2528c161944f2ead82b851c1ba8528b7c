@@ -1,0 +1,25 @@
+CHANGELOG.md
+  7de5845e4c2a6915 1-17
+parse_pbp.py
+  7de5845e4c2a6915 7,11-15,35,41,980-1045,1065,1079-1082,1086-1096,1104-1105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "0f5265a2528c161944f2ead82b851c1ba8528b7c",
+  "prompts": {
+    "7de5845e4c2a6915": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c060a9ad-45b6-44aa-a73f-d98e42fa51e5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Peter Laczko <peter.laczko@railsware.com>",
+      "messages": [],
+      "total_additions": 111,
+      "total_deletions": 5,
+      "accepted_lines": 111,
+      "overriden_lines": 0
+    }
+  }
+}
