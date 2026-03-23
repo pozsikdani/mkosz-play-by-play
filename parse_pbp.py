@@ -26,12 +26,20 @@ from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup, Tag
+from io import BytesIO
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 PBP_URL_TEMPLATE = "https://mkosz.hu/merkozes-esemenylista/{season}/{comp}/{comp}_{game_id}"
+PDF_URL_TEMPLATE = "https://hunbasketimg.webpont.com/pdf/{season}/{comp}_{game_id}.pdf"
 SCHEDULE_URL = "https://mkosz.hu/bajnoksag-musor/{season}/{comp}/"
 DEFAULT_DB = "pbp.sqlite"
 USER_AGENT = (
@@ -149,6 +157,17 @@ class Timeout:
     team: str
 
 
+@dataclass
+class RosterEntry:
+    player_name: str
+    jersey_number: Optional[int]
+    is_starter: bool
+    fouls_personal: int = 0
+    fouls_technical: int = 0
+    fouls_unsportsmanlike: int = 0
+    license_number: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
@@ -212,6 +231,39 @@ CREATE TABLE IF NOT EXISTS timeouts (
     minute          INTEGER,
     team            TEXT NOT NULL CHECK (team IN ('A', 'B'))
 );
+
+CREATE TABLE IF NOT EXISTS player_stats (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id        TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    team            TEXT NOT NULL CHECK (team IN ('A', 'B')),
+    player_name     TEXT NOT NULL,
+    is_starter      INTEGER NOT NULL DEFAULT 0,
+    minutes         INTEGER NOT NULL DEFAULT 0,
+    plus_minus      INTEGER NOT NULL DEFAULT 0,
+    val             INTEGER NOT NULL DEFAULT 0,
+    -- Összetett mutatók
+    ts_pct          REAL,    -- True Shooting %
+    efg_pct         REAL,    -- Effective FG %
+    game_score      REAL,    -- Hollinger Game Score
+    usg_pct         REAL,    -- Usage Rate %
+    ast_to          REAL,    -- Assist/Turnover ratio
+    tov_pct         REAL,    -- Turnover Rate %
+    UNIQUE(match_id, team, player_name)
+);
+
+CREATE TABLE IF NOT EXISTS rosters (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id        TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+    team            TEXT NOT NULL CHECK (team IN ('A', 'B')),
+    player_name     TEXT NOT NULL,
+    jersey_number   INTEGER,
+    is_starter      INTEGER NOT NULL DEFAULT 0,
+    fouls_personal  INTEGER NOT NULL DEFAULT 0,
+    fouls_technical INTEGER NOT NULL DEFAULT 0,
+    fouls_unsportsmanlike INTEGER NOT NULL DEFAULT 0,
+    license_number  TEXT,
+    UNIQUE(match_id, team, player_name)
+);
 """
 
 
@@ -232,6 +284,8 @@ def match_exists(conn: sqlite3.Connection, match_id: str) -> bool:
 
 
 def delete_match(conn: sqlite3.Connection, match_id: str):
+    conn.execute("DELETE FROM rosters WHERE match_id = ?", (match_id,))
+    conn.execute("DELETE FROM player_stats WHERE match_id = ?", (match_id,))
     conn.execute("DELETE FROM timeouts WHERE match_id = ?", (match_id,))
     conn.execute("DELETE FROM substitutions WHERE match_id = ?", (match_id,))
     conn.execute("DELETE FROM events WHERE match_id = ?", (match_id,))
@@ -245,6 +299,7 @@ def save_match(
     events: list[PBPEvent],
     subs: list[Substitution],
     timeouts: list[Timeout],
+    roster: Optional[dict] = None,
 ):
     conn.execute(
         """INSERT INTO matches
@@ -290,6 +345,53 @@ def save_match(
                VALUES (?,?,?,?,?)""",
             (info.match_id, to.event_seq, to.quarter, to.minute, to.team),
         )
+
+    # Calculate and save player_stats (minutes, plus_minus, val, advanced)
+    for side in ('A', 'B'):
+        starters = set(get_starters(conn, info.match_id, side))
+        minutes = get_playing_time(conn, info.match_id, side)
+        pm = get_plus_minus(conn, info.match_id, side)
+        val = get_val(conn, info.match_id, side)
+        adv = get_advanced_stats(conn, info.match_id, side)
+        # All players: union of all dicts
+        all_players = set(minutes) | set(pm) | set(val) | set(adv)
+        for player in all_players:
+            a = adv.get(player, AdvancedStats())
+            conn.execute(
+                """INSERT INTO player_stats
+                   (match_id, team, player_name, is_starter, minutes,
+                    plus_minus, val,
+                    ts_pct, efg_pct, game_score, usg_pct, ast_to, tov_pct)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    info.match_id, side, player,
+                    int(player in starters),
+                    minutes.get(player, 0),
+                    pm.get(player, 0),
+                    val.get(player, 0),
+                    a.ts_pct, a.efg_pct, a.game_score,
+                    a.usg_pct, a.ast_to, a.tov_pct,
+                ),
+            )
+
+    # Save roster data from PDF scoresheet
+    if roster:
+        for side in ('A', 'B'):
+            for entry in roster.get(side, []):
+                conn.execute(
+                    """INSERT OR IGNORE INTO rosters
+                       (match_id, team, player_name, jersey_number, is_starter,
+                        fouls_personal, fouls_technical, fouls_unsportsmanlike,
+                        license_number)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        info.match_id, side, entry.player_name,
+                        entry.jersey_number, int(entry.is_starter),
+                        entry.fouls_personal, entry.fouls_technical,
+                        entry.fouls_unsportsmanlike, entry.license_number,
+                    ),
+                )
+
     conn.commit()
 
 
@@ -303,6 +405,156 @@ def fetch_html(url: str) -> str:
     resp.raise_for_status()
     resp.encoding = "utf-8"
     return resp.text
+
+
+def fetch_pdf(season: str, comp: str, game_id: str) -> Optional[bytes]:
+    """Download scoresheet PDF. Returns None if unavailable."""
+    url = PDF_URL_TEMPLATE.format(season=season, comp=comp, game_id=game_id)
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        if len(resp.content) < 1000:
+            return None
+        return resp.content
+    except requests.RequestException:
+        return None
+
+
+def _cluster_rows(chars: list, tol: float = 5.0) -> list:
+    """Group PDF characters into rows by y-position proximity."""
+    if not chars:
+        return []
+    sorted_chars = sorted(chars, key=lambda c: c['top'])
+    rows = []
+    current_row = [sorted_chars[0]]
+    current_y = sorted_chars[0]['top']
+    for c in sorted_chars[1:]:
+        if abs(c['top'] - current_y) <= tol:
+            current_row.append(c)
+        else:
+            rows.append(current_row)
+            current_row = [c]
+            current_y = c['top']
+    rows.append(current_row)
+    return rows
+
+
+def _parse_team_roster(rows: list, y_min: float, y_max: float,
+                       all_chars: list) -> list:
+    """Extract roster entries from PDF character rows within y-range.
+
+    Uses all_chars (full page) to find foul annotations (T/U) that appear
+    in a sub-row ~13px below each player's main row.
+    """
+    entries = []
+    for row_chars in rows:
+        avg_y = sum(c['top'] for c in row_chars) / len(row_chars)
+        if avg_y < y_min or avg_y > y_max:
+            continue
+        row_chars = sorted(row_chars, key=lambda c: c['x0'])
+
+        # License number: x < 85, digits, at least 5 chars
+        license_chars = [c for c in row_chars if c['x0'] < 85 and c['text'].isdigit()]
+        if len(license_chars) < 5:
+            continue
+        license_num = ''.join(c['text'] for c in license_chars)
+
+        # Player name: 85 < x < 270, non-digit chars
+        name_chars = [c for c in row_chars if 85 < c['x0'] < 270 and not c['text'].isdigit()]
+        name = ''.join(c['text'] for c in name_chars).strip()
+        # Remove (KAP) suffix if present
+        name = re.sub(r'\s*\(KAP\)\s*$', '', name)
+        if not name:
+            name_chars = [c for c in row_chars if 90 < c['x0'] < 280 and not c['text'].isdigit()]
+            name = ''.join(c['text'] for c in name_chars).strip()
+            name = re.sub(r'\s*\(KAP\)\s*$', '', name)
+
+        # Jersey number: 265 < x < 330, digits
+        jersey_chars = [c for c in row_chars if 265 < c['x0'] < 330 and c['text'].isdigit()]
+        jersey_str = ''.join(c['text'] for c in jersey_chars)
+        jersey = int(jersey_str) if jersey_str else None
+
+        # Starter: X character at 325-370 with size >= 12 (larger font = starter)
+        x_chars = [c for c in row_chars if c['text'] == 'X' and 325 < c['x0'] < 370]
+        is_starter = any(c['size'] >= 12 for c in x_chars)
+
+        # Foul analysis: foul columns at x=360-480
+        # Main row has foul minute digits (size >= 12)
+        foul_area = [c for c in row_chars if 360 < c['x0'] < 480]
+        foul_main = [c for c in foul_area if c['text'].isdigit() and c['size'] >= 12]
+        if foul_main:
+            slot_positions = sorted(set(round(c['x0'] / 22) for c in foul_main))
+            fouls_personal = len(slot_positions)
+        else:
+            fouls_personal = 0
+
+        # Foul type annotations (T/U) appear ~13px BELOW the player row
+        # in a sub-row with smaller font (size ~11). Scan all_chars in that zone.
+        annot_y_min = avg_y + 8
+        annot_y_max = avg_y + 20
+        foul_annots = [
+            c for c in all_chars
+            if annot_y_min < c['top'] < annot_y_max
+            and 360 < c['x0'] < 480
+            and c['size'] < 12
+            and c['text'] in ('T', 'U')
+        ]
+        fouls_technical = sum(1 for c in foul_annots if c['text'] == 'T')
+        fouls_unsportsmanlike = sum(1 for c in foul_annots if c['text'] == 'U')
+
+        entries.append(RosterEntry(
+            player_name=name,
+            jersey_number=jersey,
+            is_starter=is_starter,
+            fouls_personal=fouls_personal,
+            fouls_technical=fouls_technical,
+            fouls_unsportsmanlike=fouls_unsportsmanlike,
+            license_number=license_num,
+        ))
+    return entries
+
+
+def parse_roster_pdf(pdf_bytes: bytes) -> Optional[dict]:
+    """Parse scoresheet PDF and extract roster data for both teams."""
+    if not HAS_PDFPLUMBER:
+        return None
+    pdf = pdfplumber.open(BytesIO(pdf_bytes))
+    if not pdf.pages:
+        pdf.close()
+        return None
+    page = pdf.pages[0]
+    chars = page.chars
+    if not chars:
+        pdf.close()
+        return None
+
+    rows = _cluster_rows(chars)
+
+    # Find team section markers: '"A" Csapat' and '"B" Csapat' y-positions
+    team_a_y = None
+    team_b_y = None
+    for row_chars in rows:
+        text = ''.join(c['text'] for c in sorted(row_chars, key=lambda c: c['x0']))
+        if '"A" Csapat' in text or '"A"Csapat' in text:
+            team_a_y = sum(c['top'] for c in row_chars) / len(row_chars)
+        elif '"B" Csapat' in text or '"B"Csapat' in text:
+            team_b_y = sum(c['top'] for c in row_chars) / len(row_chars)
+
+    if team_a_y is None or team_b_y is None:
+        pdf.close()
+        return None
+
+    page_height = page.height or 1700
+
+    # Parse rosters: Team A between its marker+150 and Team B marker-50
+    # Team B between its marker+150 and page bottom-100
+    roster_a = _parse_team_roster(rows, team_a_y + 150, team_b_y - 50, chars)
+    roster_b = _parse_team_roster(rows, team_b_y + 150, page_height - 100, chars)
+
+    pdf.close()
+    return {'A': roster_a, 'B': roster_b}
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +1142,274 @@ def get_playing_time(conn: sqlite3.Connection, match_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Plus-minus calculation
+# ---------------------------------------------------------------------------
+
+
+def get_plus_minus(conn: sqlite3.Connection, match_id: str,
+                   team: str) -> dict[str, int]:
+    """
+    Calculate plus-minus (+/-) for each player on a given team.
+
+    PlusMinus = TeamPointsWhilePlayerOnCourt - OpponentPointsWhilePlayerOnCourt
+
+    Tracks who is on court via starters + substitutions, then for every
+    scoring event (from either team) adjusts each on-court player's +/-.
+    """
+    # Get starters
+    starters = set(get_starters(conn, match_id, team))
+
+    # Get substitutions for this team, ordered by event_seq
+    subs = conn.execute("""
+        SELECT event_seq, player_in, player_out
+        FROM substitutions
+        WHERE match_id = ? AND team = ?
+        ORDER BY event_seq
+    """, (match_id, team)).fetchall()
+
+    # Get ALL scoring events (both teams), ordered by event_seq
+    scoring = conn.execute("""
+        SELECT event_seq, team, points
+        FROM events
+        WHERE match_id = ? AND is_scoring = 1
+        ORDER BY event_seq
+    """, (match_id,)).fetchall()
+
+    # Build interleaved timeline: (event_seq, priority, type, data)
+    # Subs get priority 0 so they are processed before scoring at same seq
+    timeline: list[tuple[int, int, str, tuple]] = []
+    for seq, p_in, p_out in subs:
+        timeline.append((seq, 0, 'sub', (p_in, p_out)))
+    for seq, t, pts in scoring:
+        timeline.append((seq, 1, 'score', (t, pts)))
+    timeline.sort(key=lambda x: (x[0], x[1]))
+
+    # Track who is on court
+    on_court = set(starters)
+    plus_minus: dict[str, int] = {p: 0 for p in starters}
+
+    for _seq, _pri, typ, data in timeline:
+        if typ == 'sub':
+            p_in, p_out = data
+            on_court.discard(p_out)
+            on_court.add(p_in)
+            plus_minus.setdefault(p_in, 0)
+        else:  # score
+            scoring_team, pts = data
+            for p in on_court:
+                if scoring_team == team:
+                    plus_minus[p] += pts
+                else:
+                    plus_minus[p] -= pts
+
+    return plus_minus
+
+
+# ---------------------------------------------------------------------------
+# VAL (Performance Index Rating) calculation
+# ---------------------------------------------------------------------------
+
+# Event types that contribute positively or negatively to VAL
+_VAL_POSITIVE = {
+    # PTS: handled via POINTS_MAP
+    "OREB", "DREB",       # REB
+    "AST",                # AST
+    "STL",                # STL
+    "BLK",                # BLK
+    "FOUL_DRAWN",         # FD (fouls drawn)
+}
+_VAL_NEGATIVE = {
+    # Missed FG: CLOSE_MISS, MID_MISS, THREE_MISS, DUNK_MISS
+    "CLOSE_MISS", "MID_MISS", "THREE_MISS", "DUNK_MISS",
+    # Missed FT
+    "FT_MISS",
+    # Turnovers
+    "TOV",
+    # Blocked against (player's shot was blocked)
+    "BLK_RECV",
+    # Personal fouls committed (NB: MKOSZ official VAL does not penalise PF,
+    # but we include it for a stricter evaluation)
+    "FOUL",
+}
+
+
+def get_val(conn: sqlite3.Connection, match_id: str,
+            team: str) -> dict[str, int]:
+    """
+    Calculate VAL (Performance Index Rating) for each player on a team.
+
+    VAL = PTS + REB + AST + STL + BLK + FD
+          - (MissedFG + MissedFT + TO + BLKAgainst + PF)
+    """
+    rows = conn.execute("""
+        SELECT player_name, event_type, points
+        FROM events
+        WHERE match_id = ? AND team = ? AND player_name IS NOT NULL
+        ORDER BY event_seq
+    """, (match_id, team)).fetchall()
+
+    val: dict[str, int] = {}
+    for player, event_type, points in rows:
+        val.setdefault(player, 0)
+        # Points scored (PTS component)
+        if points and points > 0:
+            val[player] += points
+        # Positive box-score stats
+        if event_type in _VAL_POSITIVE:
+            val[player] += 1
+        # Negative box-score stats
+        if event_type in _VAL_NEGATIVE:
+            val[player] -= 1
+
+    return val
+
+
+# ---------------------------------------------------------------------------
+# Advanced / composite stats (összetett mutatók)
+# ---------------------------------------------------------------------------
+
+# Shot event type sets for convenience
+_FG_MADE = {"CLOSE_MADE", "DUNK_MADE", "MID_MADE", "THREE_MADE"}
+_FG_MISS = {"CLOSE_MISS", "DUNK_MISS", "MID_MISS", "THREE_MISS"}
+_THREE_MADE = {"THREE_MADE"}
+_FT_MADE = {"FT_MADE"}
+_FT_MISS = {"FT_MISS"}
+
+
+@dataclass
+class AdvancedStats:
+    ts_pct: Optional[float] = None      # True Shooting %
+    efg_pct: Optional[float] = None     # Effective FG %
+    game_score: float = 0.0             # Hollinger Game Score
+    usg_pct: Optional[float] = None     # Usage Rate %
+    ast_to: Optional[float] = None      # AST/TO ratio
+    tov_pct: Optional[float] = None     # Turnover Rate %
+
+
+def get_advanced_stats(conn: sqlite3.Connection, match_id: str,
+                       team: str) -> dict[str, AdvancedStats]:
+    """
+    Calculate advanced/composite stats for each player on a team.
+
+    TS%  = PTS / (2 × (FGA + 0.44 × FTA))
+    eFG% = (FGM + 0.5 × 3PM) / FGA
+    GmSc = PTS + 0.4×FGM − 0.7×FGA − 0.4×(FTA−FTM) + 0.7×OREB
+           + 0.3×DREB + STL + 0.7×AST + 0.7×BLK − 0.4×PF − TOV
+    USG% = 100 × ((FGA + 0.44×FTA + TOV) × TeamMin/5)
+                / (PlayerMin × TeamPoss)
+    AST/TO = AST / TOV
+    TOV% = 100 × TOV / (FGA + 0.44×FTA + TOV)
+    """
+    # Gather per-player raw counts
+    rows = conn.execute("""
+        SELECT player_name, event_type, points
+        FROM events
+        WHERE match_id = ? AND team = ? AND player_name IS NOT NULL
+        ORDER BY event_seq
+    """, (match_id, team)).fetchall()
+
+    # Accumulate raw stats per player
+    raw: dict[str, dict[str, int]] = {}
+    for player, etype, pts in rows:
+        if player not in raw:
+            raw[player] = {
+                "pts": 0, "fgm": 0, "fga": 0, "three_m": 0,
+                "ftm": 0, "fta": 0, "oreb": 0, "dreb": 0,
+                "ast": 0, "stl": 0, "blk": 0, "tov": 0, "pf": 0,
+            }
+        r = raw[player]
+        if pts and pts > 0:
+            r["pts"] += pts
+        if etype in _FG_MADE:
+            r["fgm"] += 1
+            r["fga"] += 1
+        elif etype in _FG_MISS:
+            r["fga"] += 1
+        if etype in _THREE_MADE:
+            r["three_m"] += 1
+        if etype in _FT_MADE:
+            r["ftm"] += 1
+            r["fta"] += 1
+        elif etype in _FT_MISS:
+            r["fta"] += 1
+        if etype == "OREB":
+            r["oreb"] += 1
+        elif etype == "DREB":
+            r["dreb"] += 1
+        elif etype == "AST":
+            r["ast"] += 1
+        elif etype == "STL":
+            r["stl"] += 1
+        elif etype == "BLK":
+            r["blk"] += 1
+        elif etype == "TOV":
+            r["tov"] += 1
+        elif etype == "FOUL":
+            r["pf"] += 1
+
+    # Team totals for USG% calculation
+    team_fga = sum(r["fga"] for r in raw.values())
+    team_fta = sum(r["fta"] for r in raw.values())
+    team_tov = sum(r["tov"] for r in raw.values())
+    team_poss = team_fga + 0.44 * team_fta + team_tov
+
+    # Get playing time for USG%
+    minutes = get_playing_time(conn, match_id, team)
+    team_minutes = sum(minutes.values())
+
+    result: dict[str, AdvancedStats] = {}
+    for player, r in raw.items():
+        s = AdvancedStats()
+        fga = r["fga"]
+        fta = r["fta"]
+
+        # TS% = PTS / (2 × (FGA + 0.44 × FTA))
+        ts_denom = 2 * (fga + 0.44 * fta)
+        if ts_denom > 0:
+            s.ts_pct = r["pts"] / ts_denom
+
+        # eFG% = (FGM + 0.5 × 3PM) / FGA
+        if fga > 0:
+            s.efg_pct = (r["fgm"] + 0.5 * r["three_m"]) / fga
+
+        # Game Score
+        s.game_score = (
+            r["pts"]
+            + 0.4 * r["fgm"]
+            - 0.7 * fga
+            - 0.4 * (fta - r["ftm"])
+            + 0.7 * r["oreb"]
+            + 0.3 * r["dreb"]
+            + r["stl"]
+            + 0.7 * r["ast"]
+            + 0.7 * r["blk"]
+            - 0.4 * r["pf"]
+            - r["tov"]
+        )
+
+        # USG% = 100 × ((FGA + 0.44×FTA + TOV) × TeamMin/5) / (PlayerMin × TeamPoss)
+        player_min = minutes.get(player, 0)
+        player_poss = fga + 0.44 * fta + r["tov"]
+        if player_min > 0 and team_poss > 0:
+            s.usg_pct = 100 * (player_poss * (team_minutes / 5)) / (player_min * team_poss)
+
+        # AST/TO
+        if r["tov"] > 0:
+            s.ast_to = r["ast"] / r["tov"]
+        elif r["ast"] > 0:
+            s.ast_to = float(r["ast"])  # infinite ratio → just show AST count
+
+        # TOV% = 100 × TOV / (FGA + 0.44×FTA + TOV)
+        tov_denom = fga + 0.44 * fta + r["tov"]
+        if tov_denom > 0:
+            s.tov_pct = 100 * r["tov"] / tov_denom
+
+        result[player] = s
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # URL parsing
 # ---------------------------------------------------------------------------
 
@@ -970,8 +1490,21 @@ def process_match(
         print(f"  Validáció: OK ({info.score_a}-{info.score_b})")
         print(f"  Negyedek: {qs}")
 
+    # PDF scoresheet (roster, jersey numbers, foul types)
+    roster = None
+    if info.score_a and info.score_a > 0:
+        pdf_bytes = fetch_pdf(season, comp, game_id)
+        if pdf_bytes:
+            try:
+                roster = parse_roster_pdf(pdf_bytes)
+                if roster:
+                    n = sum(len(v) for v in roster.values())
+                    print(f"  Jegyzőkönyv: {n} játékos")
+            except Exception as e:
+                print(f"  Jegyzőkönyv hiba: {e}")
+
     # Save
-    save_match(conn, info, events, subs, timeouts)
+    save_match(conn, info, events, subs, timeouts, roster=roster)
     print(f"  Mentve: {db_path}")
     conn.close()
 

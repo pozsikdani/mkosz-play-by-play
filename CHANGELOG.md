@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-03-23
+
+### Added
+- **PDF scoresheet parser**: automatically downloads and parses MKOSZ scoresheet PDFs alongside PBP data.
+  - New `rosters` table: jersey numbers, starter detection, foul type breakdown (personal/technical/unsportsmanlike) per player per match.
+  - `fetch_pdf()` — downloads scoresheet PDF from `hunbasketimg.webpont.com` (graceful fallback if unavailable).
+  - `parse_roster_pdf()` — pdfplumber character-level extraction using x/y coordinates and font sizes.
+  - Foul type annotations (T/U) detected from sub-row characters ~13px below foul minute digits.
+  - Starter detection via font size: size >= 12 = starter, size < 12 = non-starter.
+  - Works for NB1B and MEFOB PDFs (tested on both).
+- `RosterEntry` dataclass for structured roster data.
+- `pdfplumber` dependency.
+
+### Data
+- Populated MEFOB Fiú (hun_univn): 72 matches (63 played, 9 future).
+
 ## 2026-03-21
 
 ### Added
