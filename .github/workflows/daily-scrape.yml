@@ -1,0 +1,41 @@
+name: Napi PBP scraping
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python csomagok telepítése
+        run: pip install requests beautifulsoup4
+
+      - name: PBP scraping (minden bajnokság)
+        run: |
+          python3 parse_pbp.py --season x2526 --comp hun2a
+          python3 parse_pbp.py --season x2526 --comp hun2b
+          python3 parse_pbp.py --season x2526 --comp hun_univn
+          python3 parse_pbp.py --season x2526 --comp whun_univn
+
+      - name: Commit és push ha változott
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pbp.sqlite
+          git diff --staged --quiet || (
+            git commit -m "PBP frissítés (auto): $(date +%Y-%m-%d)" &&
+            git push
+          )
