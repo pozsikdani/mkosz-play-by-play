@@ -1,0 +1,23 @@
+.github/workflows/daily-scrape.yml
+  cc1e7e1eff2b82b9 1-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "b2a053ef43d5102f23c6ca14de1be21e693ad7e0",
+  "prompts": {
+    "cc1e7e1eff2b82b9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85d12401-fbc2-4b2a-b6f0-5ec8a5ce3610",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Peter Laczko <peter.laczko@railsware.com>",
+      "messages": [],
+      "total_additions": 41,
+      "total_deletions": 0,
+      "accepted_lines": 41,
+      "overriden_lines": 0
+    }
+  }
+}
