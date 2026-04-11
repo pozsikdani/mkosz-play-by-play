@@ -277,10 +277,19 @@ def create_db(db_path: str) -> sqlite3.Connection:
 
 
 def match_exists(conn: sqlite3.Connection, match_id: str) -> bool:
+    """Check if match is already processed WITH data (not just a 0-0 stub)."""
     row = conn.execute(
-        "SELECT 1 FROM matches WHERE match_id = ?", (match_id,)
+        "SELECT score_a FROM matches WHERE match_id = ?", (match_id,)
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    # If score is 0-0, check if there are actual events — if not, re-process
+    if row[0] == 0:
+        has_events = conn.execute(
+            "SELECT 1 FROM events WHERE match_id = ? LIMIT 1", (match_id,)
+        ).fetchone()
+        return has_events is not None
+    return True
 
 
 def delete_match(conn: sqlite3.Connection, match_id: str):
