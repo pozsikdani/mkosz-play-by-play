@@ -27,6 +27,9 @@ jobs:
         run: |
           python3 parse_pbp.py --season x2526 --comp hun2a
           python3 parse_pbp.py --season x2526 --comp hun2b
+          # NB1B Piros rájátszás (felső + alsó házi)
+          python3 parse_pbp.py --season x2526 --comp hun2a_ply
+          python3 parse_pbp.py --season x2526 --comp hun2a_plya
           python3 parse_pbp.py --season x2526 --comp hun_univn
           python3 parse_pbp.py --season x2526 --comp whun_univn
 
