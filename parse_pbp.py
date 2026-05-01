@@ -1453,14 +1453,14 @@ def process_match(
 
     # Check existing
     conn = create_db(db_path)
-    if match_exists(conn, match_id):
-        if force:
-            print(f"  Meglévő adat törlése: {match_id}")
-            delete_match(conn, match_id)
-        else:
-            print(f"  Már feldolgozva: {match_id} (használd --force-t az újrafeldolgozáshoz)")
-            conn.close()
-            return
+    if match_exists(conn, match_id) and not force:
+        print(f"  Már feldolgozva: {match_id} (használd --force-t az újrafeldolgozáshoz)")
+        conn.close()
+        return
+    # Clean up prior data — handles both --force re-runs AND 0-0 stub matches
+    # (stubs created earlier when the meccs was unplayed; now that scores are
+    # available we re-fetch). DELETE is a no-op if no rows exist.
+    delete_match(conn, match_id)
 
     # Fetch
     t0 = time.time()
