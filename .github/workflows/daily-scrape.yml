@@ -23,15 +23,16 @@ jobs:
       - name: Python csomagok telepítése
         run: pip install requests beautifulsoup4
 
-      - name: PBP scraping (minden bajnokság)
+      - name: PBP scraping (minden bajnokság, aktív szezon)
         run: |
-          python3 parse_pbp.py --season x2526 --comp hun2a
-          python3 parse_pbp.py --season x2526 --comp hun2b
-          # NB1B Piros rájátszás (felső + alsó házi)
-          python3 parse_pbp.py --season x2526 --comp hun2a_ply
-          python3 parse_pbp.py --season x2526 --comp hun2a_plya
-          python3 parse_pbp.py --season x2526 --comp hun_univn
-          python3 parse_pbp.py --season x2526 --comp whun_univn
+          python3 parse_pbp.py --season x2627 --comp hun2a
+          python3 parse_pbp.py --season x2627 --comp hun2b
+          # NB1B Piros rájátszás (felső + alsó házi) — jelen még üres a schedule-ben,
+          # de a scraper gracefully kezeli ha nincs még meccs
+          python3 parse_pbp.py --season x2627 --comp hun2a_ply
+          python3 parse_pbp.py --season x2627 --comp hun2a_plya
+          python3 parse_pbp.py --season x2627 --comp hun_univn
+          python3 parse_pbp.py --season x2627 --comp whun_univn
 
       - name: Commit és push ha változott
         run: |
